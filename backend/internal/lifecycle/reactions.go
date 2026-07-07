@@ -116,6 +116,17 @@ type reactionPayload struct {
 	Attempts map[string]int    `json:"attempts,omitempty"`
 }
 
+// pendingNudge is one actionable PR nudge queued by ApplyPRObservation. Queuing
+// each condition's nudge (instead of sending inline and returning) keeps the
+// conditions independent — none can suppress another — and centralizes the
+// send + dedup in a single loop.
+type pendingNudge struct {
+	key         string
+	sig         string
+	msg         string
+	maxAttempts int
+}
+
 // ApplyPRObservation reacts to a fetched PR observation after the PR service has
 // persisted it. It does not write PR rows; it owns PR-driven lifecycle effects
 // and sends actionable agent nudges such as rebase, fix-CI, and
@@ -146,10 +157,13 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	if rec.IsTerminated || rec.Activity.State == domain.ActivityWaitingInput {
 		return nil
 	}
+	// Queue every applicable nudge so one PR condition cannot hide another.
+	var nudges []pendingNudge
+
 	if o.CI == domain.CIFailing {
 		checks := failedPRChecks(o.Checks)
 		if len(checks) > 0 {
-			return m.sendOnce(ctx, id, o.URL, "ci:"+o.URL, ciFailureSignature(checks), formatCIFailureMessage(checks), 0)
+			nudges = append(nudges, pendingNudge{key: "ci:" + o.URL, sig: ciFailureSignature(checks), msg: formatCIFailureMessage(checks), maxAttempts: 0})
 		}
 	}
 	if o.Review == domain.ReviewChangesRequest || hasUnresolvedComments(o.Comments) {
@@ -159,7 +173,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 		if sig == "" {
 			sig = string(o.Review)
 		}
-		return m.sendOnce(ctx, id, o.URL, "review:"+o.URL, sig, msg, reviewMaxNudge)
+		nudges = append(nudges, pendingNudge{key: "review:" + o.URL, sig: sig, msg: msg, maxAttempts: reviewMaxNudge})
 	}
 	if o.Mergeability == domain.MergeConflicting {
 		// Only the bottom of a stack is eligible for the rebase nudge. A PR
@@ -171,10 +185,15 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 		if err != nil {
 			return err
 		}
-		if blocked {
-			return nil
+		if !blocked {
+			nudges = append(nudges, pendingNudge{key: "merge-conflict:" + o.URL, sig: string(o.Mergeability), msg: "Your PR has merge conflicts. Rebase onto the base branch and resolve them.", maxAttempts: 0})
 		}
-		return m.sendOnce(ctx, id, o.URL, "merge-conflict:"+o.URL, string(o.Mergeability), "Your PR has merge conflicts. Rebase onto the base branch and resolve them.", 0)
+	}
+
+	for _, n := range nudges {
+		if err := m.sendOnce(ctx, id, o.URL, n.key, n.sig, n.msg, n.maxAttempts); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -403,12 +422,10 @@ func scmToPRObservation(o ports.SCMObservation) ports.PRObservation {
 			}
 			pr.Comments = append(pr.Comments, ports.PRCommentObservation{
 				ID:       c.ID,
-				ThreadID: th.ID,
 				Author:   c.Author,
 				File:     th.Path,
 				Line:     th.Line,
 				Body:     c.Body,
-				URL:      c.URL,
 				Resolved: th.Resolved,
 			})
 		}
@@ -499,15 +516,6 @@ func firstSCMNonEmpty(a, b string) string {
 	return b
 }
 
-func hasUnresolvedComments(comments []ports.PRCommentObservation) bool {
-	for _, c := range comments {
-		if !c.Resolved {
-			return true
-		}
-	}
-	return false
-}
-
 func failedPRChecks(checks []ports.PRCheckObservation) []ports.PRCheckObservation {
 	failed := make([]ports.PRCheckObservation, 0, len(checks))
 	for _, ch := range checks {
@@ -562,6 +570,15 @@ func formatCIFailureMessage(checks []ports.PRCheckObservation) string {
 	return msg.String()
 }
 
+func hasUnresolvedComments(comments []ports.PRCommentObservation) bool {
+	for _, c := range comments {
+		if !c.Resolved {
+			return true
+		}
+	}
+	return false
+}
+
 func unresolvedReviewComments(comments []ports.PRCommentObservation) []ports.PRCommentObservation {
 	unresolved := make([]ports.PRCommentObservation, 0, len(comments))
 	for _, c := range comments {
@@ -576,6 +593,9 @@ func unresolvedReviewComments(comments []ports.PRCommentObservation) []ports.PRC
 func reviewCommentsSignature(comments []ports.PRCommentObservation) string {
 	parts := make([]string, 0, len(comments))
 	for _, c := range comments {
+		if c.Resolved {
+			continue
+		}
 		id := strings.TrimSpace(c.ID)
 		threadID := strings.TrimSpace(c.ThreadID)
 		if id == "" && threadID == "" {

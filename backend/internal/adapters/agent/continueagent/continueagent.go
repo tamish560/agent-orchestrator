@@ -14,9 +14,7 @@
 // callbacks through the existing "ao hooks claude-code <evt>" dispatcher — no
 // Continue-specific native hook config or activity deriver is needed.
 //
-// Prompted launch is headless via
-// `cn --print [--auto|--readonly] [--rule <rule>] <prompt>`; promptless launch
-// is interactive via `cn [--auto|--readonly] [--rule <rule>]`. Restore
+// Launch is interactive via `cn [--auto|--readonly] [-- <prompt>]`. Restore
 // continues a specific native session by id with `cn --fork <sessionId>`
 // (Continue's `--resume` only continues the *last* session, so it cannot target
 // a particular AO session).
@@ -81,13 +79,11 @@ func (p *Plugin) Manifest() adapters.Manifest {
 
 // GetLaunchCommand builds the Continue CLI argv for a fresh launch.
 //
-// `--print` runs Continue in non-interactive (headless) mode, but Continue
-// rejects it without a prompt. Prompted launches therefore use
-// `cn --print ... -- <prompt>`, while promptless AO orchestrator launches stay
-// interactive as `cn ...`. Permission flags map AO's 4 modes onto Continue's
-// two booleans (--auto / --readonly); Default and AcceptEdits emit no flag so
-// Continue resolves behavior from the user's config. AO standing instructions
-// are appended through Continue's `--rule` flag.
+// AO sessions are long-lived terminal sessions, so prompted and promptless
+// launches both stay interactive as `cn ...`. Permission flags map AO's 4 modes
+// onto Continue's two booleans (--auto / --readonly); Default and AcceptEdits
+// emit no flag so Continue resolves behavior from the user's config. AO standing
+// instructions are appended through Continue's `--rule` flag.
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
 	binary, err := p.continueBinary(ctx)
 	if err != nil {
@@ -95,9 +91,6 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	}
 
 	cmd = []string{binary}
-	if cfg.Prompt != "" {
-		cmd = append(cmd, "--print")
-	}
 	appendApprovalFlags(&cmd, cfg.Permissions)
 	appendSystemPromptRule(&cmd, cfg.SystemPrompt, cfg.SystemPromptFile)
 
@@ -109,8 +102,8 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 }
 
 // GetPromptDeliveryStrategy reports how Continue receives the initial prompt.
-// Prompted launches carry the prompt in `cn --print ... -- <prompt>`;
-// promptless launches start interactively and have no command prompt to deliver.
+// Prompted launches carry the prompt in `cn ... -- <prompt>`; promptless
+// launches start interactively and have no command prompt to deliver.
 func (p *Plugin) GetPromptDeliveryStrategy(ctx context.Context, cfg ports.LaunchConfig) (ports.PromptDeliveryStrategy, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -137,11 +130,11 @@ func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfi
 	return (&claudecode.Plugin{}).GetAgentHooks(ctx, cfg)
 }
 
-// GetRestoreCommand builds `cn --print [--auto|--readonly] --fork <agentSessionId>`
-// when a hook-captured native session id is available. ok=false otherwise (the
-// manager falls back to a fresh launch). `--fork <id>` continues a specific
-// session by id; Continue's `--resume` only continues the last session and so
-// cannot target a particular AO session.
+// GetRestoreCommand builds `cn [--auto|--readonly] --fork <agentSessionId>` when
+// a hook-captured native session id is available. ok=false otherwise (the manager
+// falls back to a fresh launch). `--fork <id>` continues a specific session by
+// id; Continue's `--resume` only continues the last session and so cannot target
+// a particular AO session.
 func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig) (cmd []string, ok bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -157,7 +150,7 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	}
 
 	cmd = make([]string, 0, 4)
-	cmd = append(cmd, binary, "--print")
+	cmd = append(cmd, binary)
 	appendApprovalFlags(&cmd, cfg.Permissions)
 	appendSystemPromptRule(&cmd, cfg.SystemPrompt, cfg.SystemPromptFile)
 	cmd = append(cmd, "--fork", agentSessionID)

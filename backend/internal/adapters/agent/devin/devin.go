@@ -7,12 +7,15 @@
 // standing instructions from $AO_DATA_DIR/prompts/$AO_SESSION_ID/system.md at
 // SessionStart without writing the prompt body into the worktree.
 //
-// Launch uses `-p <prompt>` for the initial task in non-interactive/print mode
-// (in-command delivery). Permission handling uses `--permission-mode`, whose
-// valid values are `normal` (aliases: auto) and `dangerous` (aliases: yolo,
-// bypass). AO's four permission modes are mapped onto these two: Default emits
-// no flag (defer to the user's ~/.config/devin/config.json), AcceptEdits/Auto
-// map to `auto`, and BypassPermissions maps to `dangerous`.
+// Launch starts interactive Devin. Prompted worker tasks are delivered after
+// startup through the runtime pane instead of `-p <prompt>` because Devin's
+// print mode is not usable for normal implementation work: it cannot request
+// interactive write/edit approvals and may render as a blank session. Permission
+// handling uses `--permission-mode`, whose valid values are `normal` (aliases:
+// auto) and `dangerous` (aliases: yolo, bypass). AO's four permission modes are
+// mapped onto these two: Default emits no flag (defer to the user's
+// ~/.config/devin/config.json), AcceptEdits/Auto map to `auto`, and
+// BypassPermissions maps to `dangerous`.
 //
 // Restore prefers a native session id from AO session metadata via `-r <id>`
 // when one is available.
@@ -68,8 +71,8 @@ func (p *Plugin) Manifest() adapters.Manifest {
 	}
 }
 
-// GetLaunchCommand builds `devin [--permission-mode <mode>] -p <prompt>`.
-// Prompt is delivered via -p (in command, non-interactive print mode).
+// GetLaunchCommand builds `devin [--permission-mode <mode>]`.
+// Prompt is delivered after the interactive session starts.
 //
 // Permission values come from `devin --permission-mode -h`:
 // `normal` (alias auto) and `dangerous` (aliases yolo, bypass). Default omits
@@ -83,13 +86,34 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	cmd = []string{binary}
 	appendApprovalFlags(&cmd, cfg.Permissions)
 
-	if cfg.Prompt != "" {
-		cmd = append(cmd, "-p", cfg.Prompt)
-	}
-
 	return cmd, nil
 }
 
+// GetPromptDeliveryStrategy reports that Devin should receive prompted tasks
+// after the interactive terminal session has started. Avoiding `devin -p`
+// keeps worker sessions capable of implementation work and permission prompts.
+func (p *Plugin) GetPromptDeliveryStrategy(ctx context.Context, _ ports.LaunchConfig) (ports.PromptDeliveryStrategy, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return ports.PromptDeliveryAfterStart, nil
+}
+
+// GetAgentHooks reuses the Claude Code hook installer because Devin for Terminal
+// has a documented Claude Code compatibility layer.
+//
+// Official docs (https://docs.devin.ai/cli, Configuration Import / Extensibility):
+// Devin reads configuration from `.claude/` including "Commands, custom
+// subagents, hooks"; its "Lifecycle hooks (Claude Code compatible)" are stored
+// in `.devin/hooks.v1.json`. The binary itself ships a
+// `config-importers/.../claude` + `agent-ext/hooks/importers/claude` layer that
+// converts Claude hooks (SessionStart, UserPromptSubmit, Stop, PermissionRequest,
+// SessionEnd, ...) on load.
+//
+// This means Devin picks up the .claude/settings.local.json (and the AO hook
+// commands we install there) in the worktree. The installed commands are
+// "ao hooks claude-code <evt>", so the existing CLI hook dispatcher routes them
+// to claude derive logic (Devin is grouped with claude-code in cli/hooks.go).
 func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfig) error {
 	return devinHooks.Install(ctx, cfg.WorkspacePath)
 }

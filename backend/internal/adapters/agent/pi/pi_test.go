@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -51,16 +52,34 @@ func TestGetPromptDeliveryStrategy(t *testing.T) {
 	}
 }
 
-func TestGetLaunchCommandWithPrompt(t *testing.T) {
+func TestGetLaunchCommandWorkerWithPromptIsInteractive(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
 	cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Kind:   domain.KindWorker,
 		Prompt: "add a health check",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "--print", "add a health check"}
+	want := []string{"pi", "add a health check"}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
+	}
+}
+
+func TestGetLaunchCommandOrchestratorAppendsSystemPromptInteractively(t *testing.T) {
+	p := &Plugin{resolvedBinary: "pi"}
+	cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Kind:         domain.KindOrchestrator,
+		SystemPrompt: "coordinate work and avoid implementation",
+		Prompt:       "plan the issue",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"pi", "--append-system-prompt", "coordinate work and avoid implementation", "plan the issue"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
 	}
@@ -84,7 +103,7 @@ func TestGetLaunchCommandEmitsNoPermissionFlag(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"pi", "--print"}
+			want := []string{"pi"}
 			if !reflect.DeepEqual(cmd, want) {
 				t.Fatalf("cmd = %#v, want %#v", cmd, want)
 			}
@@ -107,13 +126,13 @@ func TestGetLaunchCommandAppendsSystemPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "--print", "--append-system-prompt", "follow repo rules", "do the thing"}
+	want := []string{"pi", "--append-system-prompt", "follow repo rules", "do the thing"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
 }
 
-func TestGetLaunchCommandPrefersInlineSystemPrompt(t *testing.T) {
+func TestGetLaunchCommandInlinesSystemPromptFileContents(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "system.md")
 	if err := os.WriteFile(file, []byte("file contents win"), 0o600); err != nil {
@@ -123,13 +142,13 @@ func TestGetLaunchCommandPrefersInlineSystemPrompt(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
 	cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
 		SystemPromptFile: file,
-		SystemPrompt:     "inline wins",
+		SystemPrompt:     "inline ignored",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"pi", "--print", "--append-system-prompt", "inline wins"}
+	want := []string{"pi", "--append-system-prompt", "file contents win"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -139,6 +158,7 @@ func TestGetLaunchCommandSystemPromptFileReadError(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
 	_, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
 		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
+		SystemPrompt:     "inline ignored",
 	})
 	if err == nil {
 		t.Fatal("expected error for unreadable system-prompt file, got nil")
@@ -148,8 +168,6 @@ func TestGetLaunchCommandSystemPromptFileReadError(t *testing.T) {
 func TestGetRestoreCommand(t *testing.T) {
 	p := &Plugin{resolvedBinary: "pi"}
 	cmd, ok, err := p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
-		SystemPrompt:     "restore inline wins",
-		SystemPromptFile: filepath.Join(t.TempDir(), "missing.md"),
 		Session: ports.SessionRef{
 			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "019e950e-52e0-7411-961b-d380ca7e610f"},
 		},
@@ -162,7 +180,27 @@ func TestGetRestoreCommand(t *testing.T) {
 		t.Fatal("ok=false, want true")
 	}
 
-	want := []string{"pi", "--print", "--session", "019e950e-52e0-7411-961b-d380ca7e610f", "--append-system-prompt", "restore inline wins"}
+	want := []string{"pi", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Fatalf("cmd = %#v, want %#v", cmd, want)
+	}
+}
+
+func TestGetRestoreCommandReappendsSystemPromptInteractively(t *testing.T) {
+	p := &Plugin{resolvedBinary: "pi"}
+	cmd, ok, err := p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		Kind:         domain.KindOrchestrator,
+		Session:      ports.SessionRef{Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "019e950e-52e0-7411-961b-d380ca7e610f"}},
+		SystemPrompt: "coordinate work and avoid implementation",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("ok=false, want true")
+	}
+
+	want := []string{"pi", "--append-system-prompt", "coordinate work and avoid implementation", "--session", "019e950e-52e0-7411-961b-d380ca7e610f"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}

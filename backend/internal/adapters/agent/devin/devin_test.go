@@ -56,8 +56,8 @@ func TestGetPromptDeliveryStrategy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if s != ports.PromptDeliveryInCommand {
-		t.Fatalf("strategy = %q, want in_command", s)
+	if s != ports.PromptDeliveryAfterStart {
+		t.Fatalf("strategy = %q, want after_start", s)
 	}
 }
 
@@ -70,7 +70,7 @@ func TestGetLaunchCommandBypass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"devin", "--permission-mode", "dangerous", "-p", "do the thing"}
+	want := []string{"devin", "--permission-mode", "dangerous"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -84,12 +84,15 @@ func TestGetLaunchCommandDefaultPerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"devin", "-p", "fix it"}
+	want := []string{"devin"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
 	if strings.Contains(strings.Join(cmd, " "), "permission-mode") {
 		t.Fatal("should not have --permission-mode for default perms")
+	}
+	if strings.Contains(strings.Join(cmd, " "), "-p") {
+		t.Fatal("should not use Devin print mode for prompted launches")
 	}
 }
 
@@ -102,7 +105,7 @@ func TestGetLaunchCommandAcceptEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"devin", "--permission-mode", "auto", "-p", "refactor auth"}
+	want := []string{"devin", "--permission-mode", "auto"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -117,7 +120,7 @@ func TestGetLaunchCommandAuto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"devin", "--permission-mode", "auto", "-p", "ship it"}
+	want := []string{"devin", "--permission-mode", "auto"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
