@@ -702,6 +702,10 @@ func (m *Manager) SwitchHarness(ctx context.Context, id domain.SessionID, newHar
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("switch %s: system prompt: %w", id, err)
 	}
+	systemPromptFile, err := m.prepareSystemPromptFile(id, newHarness, systemPrompt)
+	if err != nil {
+		return domain.SessionRecord{}, fmt.Errorf("switch %s: system prompt file: %w", id, err)
+	}
 	agentConfig := effectiveAgentConfig(rec.Kind, project.Config)
 	if model != "" {
 		agentConfig.Model = model
@@ -714,16 +718,16 @@ func (m *Manager) SwitchHarness(ctx context.Context, id domain.SessionID, newHar
 	launched := appendHarnessUnique(meta.LaunchedHarnesses, rec.Harness, newHarness)
 
 	if rec.IsTerminated {
-		return m.relaunchTerminatedWithHarness(ctx, rec, project, agent, newHarness, systemPrompt, agentConfig, resume, launched)
+		return m.relaunchTerminatedWithHarness(ctx, rec, project, agent, newHarness, systemPrompt, systemPromptFile, agentConfig, resume, launched)
 	}
-	return m.switchLiveHarness(ctx, rec, project, agent, newHarness, systemPrompt, agentConfig, resume, launched)
+	return m.switchLiveHarness(ctx, rec, project, agent, newHarness, systemPrompt, systemPromptFile, agentConfig, resume, launched)
 }
 
 // switchAgentArgv builds and pre-flight-validates the launch command for a
 // switch/relaunch. When resume is true it uses the agent's resume command (via
 // restoreArgv, which falls back to a fresh launch when the adapter cannot
 // resume); otherwise it launches fresh. Shared by the live and terminated paths.
-func (m *Manager) switchAgentArgv(ctx context.Context, id domain.SessionID, workspacePath string, meta domain.SessionMetadata, issue domain.IssueID, kind domain.SessionKind, systemPrompt string, cfg ports.AgentConfig, agent ports.Agent, resume bool) ([]string, error) {
+func (m *Manager) switchAgentArgv(ctx context.Context, id domain.SessionID, workspacePath string, meta domain.SessionMetadata, issue domain.IssueID, kind domain.SessionKind, systemPrompt, systemPromptFile string, cfg ports.AgentConfig, agent ports.Agent, resume bool) ([]string, error) {
 	var argv []string
 	var err error
 	if resume {
@@ -738,16 +742,17 @@ func (m *Manager) switchAgentArgv(ctx context.Context, id domain.SessionID, work
 		// against a wrong/empty id.
 		resumeMeta := meta
 		resumeMeta.AgentSessionID = ""
-		argv, err = restoreArgv(ctx, agent, id, workspacePath, resumeMeta, systemPrompt, cfg, kind)
+		argv, err = restoreArgv(ctx, agent, id, workspacePath, resumeMeta, systemPrompt, systemPromptFile, cfg, kind)
 	} else {
 		argv, err = agent.GetLaunchCommand(ctx, ports.LaunchConfig{
-			SessionID:     string(id),
-			WorkspacePath: workspacePath,
-			Prompt:        meta.Prompt,
-			SystemPrompt:  systemPrompt,
-			IssueID:       string(issue),
-			Config:        cfg,
-			Permissions:   cfg.Permissions,
+			SessionID:        string(id),
+			WorkspacePath:    workspacePath,
+			Prompt:           meta.Prompt,
+			SystemPrompt:     systemPrompt,
+			SystemPromptFile: systemPromptFile,
+			IssueID:          string(issue),
+			Config:           cfg,
+			Permissions:      cfg.Permissions,
 		})
 		if err != nil {
 			err = fmt.Errorf("launch command: %w", err)
@@ -763,20 +768,20 @@ func (m *Manager) switchAgentArgv(ctx context.Context, id domain.SessionID, work
 }
 
 // switchLiveHarness swaps the agent of a running session in place.
-func (m *Manager) switchLiveHarness(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, agent ports.Agent, newHarness domain.AgentHarness, systemPrompt string, agentConfig ports.AgentConfig, resume bool, launched []domain.AgentHarness) (domain.SessionRecord, error) {
+func (m *Manager) switchLiveHarness(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, agent ports.Agent, newHarness domain.AgentHarness, systemPrompt, systemPromptFile string, agentConfig ports.AgentConfig, resume bool, launched []domain.AgentHarness) (domain.SessionRecord, error) {
 	id := rec.ID
 	meta := rec.Metadata
 	if meta.RuntimeHandleID == "" {
 		return domain.SessionRecord{}, fmt.Errorf("switch %s: %w", id, ErrIncompleteHandle)
 	}
-	argv, err := m.switchAgentArgv(ctx, id, meta.WorkspacePath, meta, rec.IssueID, rec.Kind, systemPrompt, agentConfig, agent, resume)
+	argv, err := m.switchAgentArgv(ctx, id, meta.WorkspacePath, meta, rec.IssueID, rec.Kind, systemPrompt, systemPromptFile, agentConfig, agent, resume)
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("switch %s: %w", id, err)
 	}
 
 	// The switch guard is already held by SwitchHarness (which defers EndSwitch),
 	// so the reaper ignores the runtime gap opened by the destroy/create below.
-	if err := m.prepareWorkspace(ctx, agent, id, meta.WorkspacePath, systemPrompt, agentConfig); err != nil {
+	if err := m.prepareWorkspace(ctx, agent, id, meta.WorkspacePath, systemPrompt, systemPromptFile, agentConfig); err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("switch %s: %w", id, err)
 	}
 	// Same worktree means the two agents must never run at once: stop the old
@@ -809,7 +814,7 @@ func (m *Manager) switchLiveHarness(ctx context.Context, rec domain.SessionRecor
 // different agent, reusing its worktree. There is no live runtime to tear down
 // and the reaper skips terminated sessions, so no BeginSwitch guard is needed —
 // MarkSwitched flips it back to live once the new runtime is up.
-func (m *Manager) relaunchTerminatedWithHarness(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, agent ports.Agent, newHarness domain.AgentHarness, systemPrompt string, agentConfig ports.AgentConfig, resume bool, launched []domain.AgentHarness) (domain.SessionRecord, error) {
+func (m *Manager) relaunchTerminatedWithHarness(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, agent ports.Agent, newHarness domain.AgentHarness, systemPrompt, systemPromptFile string, agentConfig ports.AgentConfig, resume bool, launched []domain.AgentHarness) (domain.SessionRecord, error) {
 	id := rec.ID
 	meta := rec.Metadata
 	// Mirror restoreArgv's guard, but only for a FRESH launch: a resumed harness
@@ -830,10 +835,10 @@ func (m *Manager) relaunchTerminatedWithHarness(ctx context.Context, rec domain.
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("switch %s: workspace: %w", id, err)
 	}
-	if err := m.prepareWorkspace(ctx, agent, id, ws.Path, systemPrompt, agentConfig); err != nil {
+	if err := m.prepareWorkspace(ctx, agent, id, ws.Path, systemPrompt, systemPromptFile, agentConfig); err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("switch %s: %w", id, err)
 	}
-	argv, err := m.switchAgentArgv(ctx, id, ws.Path, meta, rec.IssueID, rec.Kind, systemPrompt, agentConfig, agent, resume)
+	argv, err := m.switchAgentArgv(ctx, id, ws.Path, meta, rec.IssueID, rec.Kind, systemPrompt, systemPromptFile, agentConfig, agent, resume)
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("switch %s: %w", id, err)
 	}
