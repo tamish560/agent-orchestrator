@@ -2,7 +2,10 @@ package devin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -232,10 +235,7 @@ func TestSessionInfoFalseWhenNoHookMetadata(t *testing.T) {
 	}
 }
 
-func TestGetAgentHooksDelegates(t *testing.T) {
-	// We don't exercise the full hook merge here (claude tests cover it);
-	// just ensure it doesn't blow up on a temp workspace and that the
-	// method is wired (real hook install is exercised via claude delegation).
+func TestGetAgentHooksInstallsLocalDevinConfig(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "devin"}
 	ws := t.TempDir()
 	if err := plugin.GetAgentHooks(context.Background(), ports.WorkspaceHookConfig{
@@ -243,6 +243,38 @@ func TestGetAgentHooksDelegates(t *testing.T) {
 		SessionID:     "devin-test-1",
 	}); err != nil {
 		t.Fatalf("GetAgentHooks: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(ws, ".devin", "config.local.json"))
+	if err != nil {
+		t.Fatalf("read config.local.json: %v", err)
+	}
+	var config struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("parse config.local.json: %v\n%s", err, data)
+	}
+	sessionStart := config.Hooks["SessionStart"]
+	if len(sessionStart) != 1 || len(sessionStart[0].Hooks) != 1 {
+		t.Fatalf("SessionStart hooks = %#v, want one AO command", sessionStart)
+	}
+	hook := sessionStart[0].Hooks[0]
+	if hook.Type != "command" || hook.Command != "ao hooks devin session-start" || hook.Timeout != 30 {
+		t.Fatalf("SessionStart hook = %#v", hook)
+	}
+	gitignore, err := os.ReadFile(filepath.Join(ws, ".devin", ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .devin/.gitignore: %v", err)
+	}
+	if !strings.Contains(string(gitignore), "config.local.json") {
+		t.Fatalf(".devin/.gitignore does not ignore config.local.json:\n%s", gitignore)
 	}
 }
 
