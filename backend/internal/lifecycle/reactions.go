@@ -157,18 +157,25 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	if rec.IsTerminated || rec.Activity.State == domain.ActivityWaitingInput {
 		return nil
 	}
-	// Queue every applicable nudge so one PR condition cannot hide another.
+	// A single PR can trip several actionable conditions at once (failing CI,
+	// unresolved review comments, a merge conflict). Queue every applicable nudge
+	// and send them together, so each surfaces independently instead of one
+	// returning early and hiding the rest — the bug this reducer had, where a CI
+	// failure suppressed review feedback on the same PR. Each nudge self-dedups
+	// via sendOnce; a send error short-circuits, and nudges already sent have
+	// persisted their own dedup signature so the next poll retries only the rest.
+	ident := prIdentity(o)
 	var nudges []pendingNudge
 
 	if o.CI == domain.CIFailing {
 		checks := failedPRChecks(o.Checks)
 		if len(checks) > 0 {
-			nudges = append(nudges, pendingNudge{key: "ci:" + o.URL, sig: ciFailureSignature(checks), msg: formatCIFailureMessage(checks), maxAttempts: 0})
+			nudges = append(nudges, pendingNudge{key: "ci:" + o.URL, sig: ciFailureSignature(checks), msg: formatCIFailureMessage(ident, o.URL, checks), maxAttempts: 0})
 		}
 	}
 	if o.Review == domain.ReviewChangesRequest || hasUnresolvedComments(o.Comments) {
 		comments := unresolvedReviewComments(o.Comments)
-		msg := formatReviewCommentsMessage(comments)
+		msg := formatReviewCommentsMessage(ident, o.URL, comments)
 		sig := reviewCommentsSignature(comments)
 		if sig == "" {
 			sig = string(o.Review)
@@ -186,7 +193,11 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 			return err
 		}
 		if !blocked {
-			nudges = append(nudges, pendingNudge{key: "merge-conflict:" + o.URL, sig: string(o.Mergeability), msg: "Your PR has merge conflicts. Rebase onto the base branch and resolve them.", maxAttempts: 0})
+			msg := "There are merge conflicts on " + ident + ". Rebase onto the base branch and resolve them."
+			if o.URL != "" {
+				msg += "\nPR: " + domain.SanitizeControlChars(o.URL)
+			}
+			nudges = append(nudges, pendingNudge{key: "merge-conflict:" + o.URL, sig: string(o.Mergeability), msg: msg, maxAttempts: 0})
 		}
 	}
 
@@ -378,6 +389,9 @@ func scmToPRObservation(o ports.SCMObservation) ports.PRObservation {
 		Fetched:      o.Fetched,
 		URL:          firstSCMNonEmpty(o.PR.URL, o.PR.HTMLURL),
 		Number:       o.PR.Number,
+		Title:        o.PR.Title,
+		SourceBranch: o.PR.SourceBranch,
+		TargetBranch: o.PR.TargetBranch,
 		Draft:        o.PR.Draft,
 		Merged:       o.PR.Merged,
 		Closed:       o.PR.Closed,
@@ -516,6 +530,25 @@ func firstSCMNonEmpty(a, b string) string {
 	return b
 }
 
+// prIdentity renders a short, sanitized PR identity ("PR #123 \"Title\"
+// (feat/x → main)") for nudge messages so an agent in a multi-PR session can
+// tell which PR — and where in a stack — a nudge refers to. Title and branch
+// names are provider-controlled and reach the agent's live pane, so both are
+// control-char sanitized. Falls back to "your PR" when the number is unknown.
+func prIdentity(o ports.PRObservation) string {
+	if o.Number <= 0 {
+		return "your PR"
+	}
+	id := fmt.Sprintf("PR #%d", o.Number)
+	if o.Title != "" {
+		id += fmt.Sprintf(" %q", domain.SanitizeControlChars(o.Title))
+	}
+	if o.SourceBranch != "" && o.TargetBranch != "" {
+		id += fmt.Sprintf(" (%s → %s)", domain.SanitizeControlChars(o.SourceBranch), domain.SanitizeControlChars(o.TargetBranch))
+	}
+	return id
+}
+
 func failedPRChecks(checks []ports.PRCheckObservation) []ports.PRCheckObservation {
 	failed := make([]ports.PRCheckObservation, 0, len(checks))
 	for _, ch := range checks {
@@ -534,9 +567,12 @@ func ciFailureSignature(checks []ports.PRCheckObservation) string {
 	return strings.Join(parts, "\x01")
 }
 
-func formatCIFailureMessage(checks []ports.PRCheckObservation) string {
+func formatCIFailureMessage(ident, prURL string, checks []ports.PRCheckObservation) string {
 	var msg strings.Builder
-	msg.WriteString("CI is failing on your PR.\n")
+	fmt.Fprintf(&msg, "CI is failing on %s.\n", ident)
+	if prURL != "" {
+		fmt.Fprintf(&msg, "PR: %s\n", domain.SanitizeControlChars(prURL))
+	}
 	for _, ch := range checks {
 		name := domain.SanitizeControlChars(ch.Name)
 		if strings.TrimSpace(name) == "" {
@@ -607,12 +643,19 @@ func reviewCommentsSignature(comments []ports.PRCommentObservation) string {
 	return strings.Join(parts, "\x01")
 }
 
-func formatReviewCommentsMessage(comments []ports.PRCommentObservation) string {
+func formatReviewCommentsMessage(ident, prURL string, comments []ports.PRCommentObservation) string {
 	if len(comments) == 0 {
-		return "A reviewer left feedback on your PR. Address it and push. Fetch the review details only if you need additional context beyond what AO has provided here."
+		msg := "A reviewer left feedback on " + ident + ". Address it and push."
+		if prURL != "" {
+			msg += "\nPR: " + domain.SanitizeControlChars(prURL)
+		}
+		return msg + "\n\nFetch the review details only if you need additional context beyond what AO has provided here."
 	}
 	var msg strings.Builder
-	fmt.Fprintf(&msg, "The following %d unresolved review comment(s) are on your PR as of just now. You should not need to re-fetch this data unless you need additional context.\n", len(comments))
+	fmt.Fprintf(&msg, "The following %d unresolved review comment(s) are on %s as of just now. You should not need to re-fetch this data unless you need additional context.\n", len(comments), ident)
+	if prURL != "" {
+		fmt.Fprintf(&msg, "PR: %s\n", domain.SanitizeControlChars(prURL))
+	}
 	for i, c := range comments {
 		location := "(general)"
 		if c.File != "" {

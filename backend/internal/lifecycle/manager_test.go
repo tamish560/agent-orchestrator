@@ -273,7 +273,7 @@ func TestReviewCommentsSignatureUsesStableIDs(t *testing.T) {
 
 func TestFormatCIFailureMessageUsesNonMutatingFence(t *testing.T) {
 	logTail := "start\n```\ninner\n````\nend"
-	msg := formatCIFailureMessage([]ports.PRCheckObservation{{
+	msg := formatCIFailureMessage("your PR", "", []ports.PRCheckObservation{{
 		Name: "build", Status: domain.PRCheckFailed, LogTail: logTail,
 	}})
 	if !strings.Contains(msg, logTail) {
@@ -459,6 +459,34 @@ func TestPRObservation_MergeConflictNudgesAgent(t *testing.T) {
 	}
 	if len(msg.msgs) != 1 || !strings.Contains(msg.msgs[0], "merge conflicts") {
 		t.Fatalf("want merge-conflict nudge, got %v", msg.msgs)
+	}
+}
+
+func TestPRObservation_NudgeIncludesPRIdentity(t *testing.T) {
+	m, st, msg := newManager()
+	st.sessions["mer-1"] = working("mer-1")
+	o := ports.PRObservation{
+		Fetched:      true,
+		URL:          "https://github.com/o/r/pull/7",
+		Number:       7,
+		Title:        "Add auth",
+		SourceBranch: "feat/x/auth",
+		TargetBranch: "feat/x",
+		CI:           domain.CIFailing,
+		Checks:       []ports.PRCheckObservation{{Name: "build", CommitHash: "c1", Status: domain.PRCheckFailed, LogTail: "boom"}},
+	}
+	if err := m.ApplyPRObservation(ctx, "mer-1", o); err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.msgs) != 1 {
+		t.Fatalf("want one CI nudge, got %d: %v", len(msg.msgs), msg.msgs)
+	}
+	got := msg.msgs[0]
+	if !strings.Contains(got, `PR #7 "Add auth" (feat/x/auth → feat/x)`) {
+		t.Fatalf("nudge missing PR identity: %q", got)
+	}
+	if !strings.Contains(got, "PR: https://github.com/o/r/pull/7") {
+		t.Fatalf("nudge missing PR URL: %q", got)
 	}
 }
 
