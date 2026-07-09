@@ -3,10 +3,12 @@ package copilot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -145,7 +147,7 @@ func TestGetLaunchCommandRespectsCanceledContext(t *testing.T) {
 	}
 }
 
-func TestGetPromptDeliveryStrategyIsInCommand(t *testing.T) {
+func TestGetPromptDeliveryStrategyIsAfterStart(t *testing.T) {
 	plugin := &Plugin{}
 
 	got, err := plugin.GetPromptDeliveryStrategy(context.Background(), ports.LaunchConfig{})
@@ -154,6 +156,45 @@ func TestGetPromptDeliveryStrategyIsInCommand(t *testing.T) {
 	}
 	if got != ports.PromptDeliveryAfterStart {
 		t.Fatalf("unexpected strategy: %q", got)
+	}
+}
+
+func TestGetLaunchCommandUsesCustomInstructionsNotSystemPromptFlag(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "copilot"}
+	promptFile := filepath.Join(t.TempDir(), "system.md")
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SystemPrompt:     "follow AO rules",
+		SystemPromptFile: promptFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, disallowed := range []string{"--system", "--system-prompt", "--append-system-prompt"} {
+		if contains(cmd, disallowed) {
+			t.Fatalf("command %#v unexpectedly contains unsupported Copilot system prompt flag %q", cmd, disallowed)
+		}
+	}
+	if !contains(cmd, "COPILOT_CUSTOM_INSTRUCTIONS_DIRS="+filepath.Dir(promptFile)) {
+		t.Fatalf("command %#v does not configure Copilot custom instructions", cmd)
+	}
+}
+
+func TestGetLaunchCommandSelectsSessionCustomAgent(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "copilot"}
+	promptFile := filepath.Join(t.TempDir(), "system.md")
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SessionID:        "mer-1",
+		SystemPrompt:     "orchestrator must spawn workers",
+		SystemPromptFile: promptFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(cmd, "--agent=ao-mer-1") {
+		t.Fatalf("command %#v does not select session custom agent", cmd)
 	}
 }
 
@@ -309,6 +350,7 @@ func TestGetRestoreCommandAddsCustomInstructionsDir(t *testing.T) {
 	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
 		SystemPromptFile: promptFile,
 		Session: ports.SessionRef{
+			ID:       "mer-1",
 			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "uuid-123"},
 		},
 	})
@@ -319,7 +361,7 @@ func TestGetRestoreCommandAddsCustomInstructionsDir(t *testing.T) {
 		t.Fatal("ok = false, want true")
 	}
 	dir := filepath.Dir(promptFile)
-	want := []string{"env", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS=" + dir, "copilot", "--resume", "uuid-123"}
+	want := []string{"env", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS=" + dir, "copilot", "--agent=ao-mer-1", "--resume", "uuid-123"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
 	}
@@ -329,6 +371,31 @@ func TestGetRestoreCommandAddsCustomInstructionsDir(t *testing.T) {
 	}
 	if string(data) != "restore AO rules\n" {
 		t.Fatalf("AGENTS.md = %q, want file prompt", data)
+	}
+}
+
+func TestGetRestoreCommandSelectsSessionCustomAgentFromPromptFile(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "copilot"}
+	promptFile := filepath.Join(t.TempDir(), "system.md")
+	if err := os.WriteFile(promptFile, []byte("orchestrator must spawn workers"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		SystemPromptFile: promptFile,
+		Session: ports.SessionRef{
+			ID:       "mer-1",
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "uuid-123"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if !contains(cmd, "--agent=ao-mer-1") {
+		t.Fatalf("restore command %#v does not select session custom agent", cmd)
 	}
 }
 
@@ -416,6 +483,9 @@ func TestSessionInfoFalseWhenNoHookMetadata(t *testing.T) {
 func TestGetAgentHooksInstallsCopilotHooks(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "copilot"}
 	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".git", "info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	hooksPath := copilotHooksPath(workspace)
 	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o755); err != nil {
@@ -463,6 +533,106 @@ func TestGetAgentHooksInstallsCopilotHooks(t *testing.T) {
 	}
 	if countCopilotHookCommand(file.Hooks["agentStop"], "custom stop hook") != 1 {
 		t.Fatalf("existing agentStop hook was not preserved: %#v", file.Hooks["agentStop"])
+	}
+}
+
+func TestGetAgentHooksInstallsSessionCopilotAgent(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "copilot"}
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".git", "info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := ports.WorkspaceHookConfig{
+		DataDir:       t.TempDir(),
+		SessionID:     "sess-1",
+		SystemPrompt:  "orchestrator must spawn workers",
+		WorkspacePath: workspace,
+	}
+	if err := plugin.GetAgentHooks(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workspace, "AGENTS.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("root AGENTS.md exists or stat failed: %v", err)
+	}
+	exclude, err := os.ReadFile(filepath.Join(workspace, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(workspace, ".github", "agents", "ao-sess-1.agent.md")
+	agentData, err := os.ReadFile(agentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentText := string(agentData)
+	if !strings.HasPrefix(agentText, "---\n") {
+		t.Fatalf("agent profile must start with YAML frontmatter for Copilot discovery:\n%s", agentText)
+	}
+	for _, want := range []string{
+		copilotAgentSentinel,
+		"name: ao-sess-1",
+		"target: github-copilot",
+		"orchestrator must spawn workers",
+	} {
+		if !strings.Contains(agentText, want) {
+			t.Fatalf("agent profile missing %q:\n%s", want, agentText)
+		}
+	}
+	if !strings.Contains(string(exclude), "/.github/agents/ao-sess-1.agent.md\n") {
+		t.Fatalf("git exclude does not ignore custom agent:\n%s", exclude)
+	}
+}
+
+func TestGetAgentHooksUpdatesManagedSessionCopilotAgent(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "copilot"}
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".git", "info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := ports.WorkspaceHookConfig{DataDir: t.TempDir(), SessionID: "sess-1", SystemPrompt: "old rules", WorkspacePath: workspace}
+	if err := plugin.GetAgentHooks(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.SystemPrompt = "new rules"
+	if err := plugin.GetAgentHooks(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workspace, ".github", "agents", "ao-sess-1.agent.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "old rules") || !strings.Contains(text, "new rules") {
+		t.Fatalf("AGENTS.md was not updated:\n%s", text)
+	}
+}
+
+func TestGetAgentHooksDoesNotOverwriteProjectCopilotInstructions(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "copilot"}
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("project-owned rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := ports.WorkspaceHookConfig{
+		DataDir:       t.TempDir(),
+		SessionID:     "sess-1",
+		SystemPrompt:  "ao rules",
+		WorkspacePath: workspace,
+	}
+	if err := plugin.GetAgentHooks(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workspace, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "project-owned rules\n" {
+		t.Fatalf("project AGENTS.md was overwritten:\n%s", data)
 	}
 }
 

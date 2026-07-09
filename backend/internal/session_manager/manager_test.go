@@ -433,6 +433,75 @@ func (m *fakeMessenger) Send(_ context.Context, _ domain.SessionID, msg string) 
 	return m.err
 }
 
+func TestSend_WrapsCopilotOrchestratorMessageWithDelegationDirective(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID:        "mer-1",
+		ProjectID: "mer",
+		Kind:      domain.KindOrchestrator,
+		Harness:   domain.HarnessCopilot,
+	}
+	msg := &fakeMessenger{}
+	m := New(Deps{Store: st, Messenger: msg})
+
+	if err := m.Send(ctx, "mer-1", "make the button red"); err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.msgs) != 1 {
+		t.Fatalf("messages = %d, want 1", len(msg.msgs))
+	}
+	got := msg.msgs[0]
+	for _, want := range []string{
+		"AO ORCHESTRATOR DIRECTIVE",
+		"Do not implement code changes",
+		"ao spawn --project mer",
+		"After spawning or redirecting, report the worker session id and stop",
+		"USER MESSAGE:\nmake the button red",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("wrapped message missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestSend_DoesNotWrapCopilotWorkerMessage(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-2"] = domain.SessionRecord{
+		ID:        "mer-2",
+		ProjectID: "mer",
+		Kind:      domain.KindWorker,
+		Harness:   domain.HarnessCopilot,
+	}
+	msg := &fakeMessenger{}
+	m := New(Deps{Store: st, Messenger: msg})
+
+	if err := m.Send(ctx, "mer-2", "make the button red"); err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.msgs[0]; got != "make the button red" {
+		t.Fatalf("worker message = %q, want original", got)
+	}
+}
+
+func TestSend_DoesNotWrapNonCopilotOrchestratorMessage(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID:        "mer-1",
+		ProjectID: "mer",
+		Kind:      domain.KindOrchestrator,
+		Harness:   domain.HarnessClaudeCode,
+	}
+	msg := &fakeMessenger{}
+	m := New(Deps{Store: st, Messenger: msg})
+
+	if err := m.Send(ctx, "mer-1", "make the button red"); err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.msgs[0]; got != "make the button red" {
+		t.Fatalf("non-copilot orchestrator message = %q, want original", got)
+	}
+}
+
 func newManager() (*Manager, *fakeStore, *fakeRuntime, *fakeWorkspace) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
