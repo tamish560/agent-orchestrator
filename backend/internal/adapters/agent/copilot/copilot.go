@@ -66,25 +66,18 @@ func (p *Plugin) Manifest() adapters.Manifest {
 
 // GetLaunchCommand builds the argv to start a new interactive Copilot session:
 //
-//	[env COPILOT_CUSTOM_INSTRUCTIONS_DIRS=<ao-dir>[,<existing>]] copilot [permission flags]
+//	copilot [permission flags] [--agent ao-<session>]
 //
 // The prompt is delivered after the process starts; using `-p` runs Copilot in
 // programmatic mode and exits when done, which leaves AO's terminal pane blank
-// or dead. Copilot CLI does not expose a system-prompt flag. Its documented
-// standing-instruction path is custom instructions, so AO writes AGENTS.md into
-// the AO prompt artifact directory and points COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-// at it when standing instructions are present.
+// or dead. Copilot CLI does not expose a system-prompt flag, so AO installs a
+// per-session custom agent profile in GetAgentHooks and selects it here.
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
 	binary, err := p.copilotBinary(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	envPrefix, err := copilotInstructionsEnvPrefix(cfg.SystemPrompt, cfg.SystemPromptFile)
-	if err != nil {
-		return nil, err
-	}
-	cmd = envPrefix
 	cmd = append(cmd, binary)
 	appendApprovalFlags(&cmd, cfg.Permissions)
 	if agentName := copilotAgentName(cfg.SessionID, cfg.SystemPrompt, cfg.SystemPromptFile); agentName != "" {
@@ -127,11 +120,6 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		return nil, false, err
 	}
 
-	envPrefix, err := copilotInstructionsEnvPrefix(cfg.SystemPrompt, cfg.SystemPromptFile)
-	if err != nil {
-		return nil, false, err
-	}
-	cmd = envPrefix
 	cmd = append(cmd, binary)
 	appendApprovalFlags(&cmd, cfg.Permissions)
 	if agentName := copilotAgentName(cfg.Session.ID, cfg.SystemPrompt, cfg.SystemPromptFile); agentName != "" {
@@ -262,33 +250,6 @@ func (p *Plugin) copilotBinary(ctx context.Context) (string, error) {
 	}
 	p.resolvedBinary = binary
 	return binary, nil
-}
-
-const copilotCustomInstructionsEnvVar = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"
-
-func copilotInstructionsEnvPrefix(inlinePrompt, promptFile string) ([]string, error) {
-	if inlinePrompt == "" && promptFile == "" {
-		return nil, nil
-	}
-	if promptFile == "" {
-		return nil, fmt.Errorf("copilot: system prompt file required to build custom instructions")
-	}
-	dir := filepath.Dir(promptFile)
-	prompt, err := copilotSystemPromptText(inlinePrompt, promptFile)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("copilot: create custom instructions dir: %w", err)
-	}
-	if err := hookutil.AtomicWriteFile(filepath.Join(dir, "AGENTS.md"), []byte(strings.TrimRight(prompt, "\n")+"\n"), 0o600); err != nil {
-		return nil, fmt.Errorf("copilot: write custom instructions: %w", err)
-	}
-	value := dir
-	if existing := strings.TrimSpace(os.Getenv(copilotCustomInstructionsEnvVar)); existing != "" {
-		value += "," + existing
-	}
-	return []string{"env", copilotCustomInstructionsEnvVar + "=" + value}, nil
 }
 
 func copilotSystemPromptText(inline, file string) (string, error) {
