@@ -1558,9 +1558,11 @@ func TestSpawnOrchestrator_UsesCoordinatorPrompt(t *testing.T) {
 	for _, want := range []string{
 		"You are the human-facing orchestrator for project mer",
 		`ao spawn --project mer --name "<label, max 20 chars>" --prompt "<clear worker task>"`,
+		"Before running `ao spawn`, count the `--name` label yourself",
 		"coordination-only by default",
-		"unless the human explicitly asks you to do so",
-		"first confirm the intended scope and why the work should not be delegated",
+		"always spawn or redirect a worker session",
+		"Never edit source files, resolve merge conflicts, run implementation-focused changes",
+		"spawn or redirect a worker session instead of doing the work yourself",
 		"Use `ao send` for session communication",
 		"Delegate implementation, fixes, tests, and PR ownership to worker sessions",
 		"skills/using-ao/SKILL.md",
