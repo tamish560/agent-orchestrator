@@ -1,9 +1,9 @@
 // Package amp implements the Amp agent adapter: launching new interactive Amp
 // sessions and resuming sessions when a native Amp thread id is known.
 //
-// Amp activity hooks and SessionInfo derivation will likely require an
-// Amp-specific TypeScript plugin, similar to opencode. Until that integration
-// exists, hook installation and SessionInfo are intentionally no-ops.
+// AO injects standing session instructions through a workspace-local Amp
+// TypeScript plugin. Activity hooks and SessionInfo derivation will likely
+// require more Amp-specific plugin work, so SessionInfo remains a no-op.
 package amp
 
 import (
@@ -50,11 +50,12 @@ func (p *Plugin) Manifest() adapters.Manifest {
 
 // GetLaunchCommand builds the argv to start a new interactive Amp session:
 //
-//	amp [-x <prompt>]
+//	amp [-x <prompt> --plugin-ready-timeout]
 //
-// Amp's current CLI has no documented per-run permission or system-prompt flag.
-// When AO has an initial prompt, it is sent through execute mode (`-x`), whose
-// next argv element is the prompt text so a leading "-" is not parsed as a flag.
+// Amp's current CLI has no documented per-run permission or system-prompt flag,
+// so standing instructions are installed by GetAgentHooks as a plugin. When AO
+// has an initial prompt, it is sent through execute mode (`-x`), whose next argv
+// element is the prompt text so a leading "-" is not parsed as a flag.
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -66,7 +67,7 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 
 	cmd = []string{binary}
 	if cfg.Prompt != "" {
-		cmd = append(cmd, "-x", cfg.Prompt)
+		cmd = append(cmd, "-x", cfg.Prompt, "--plugin-ready-timeout")
 	}
 	return cmd, nil
 }
