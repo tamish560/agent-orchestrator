@@ -1783,6 +1783,7 @@ func (m *Manager) prepareSystemPromptFile(id domain.SessionID, harness domain.Ag
 func systemPromptFileRequired(harness domain.AgentHarness) bool {
 	switch harness {
 	case domain.HarnessAider,
+		domain.HarnessAgy,
 		domain.HarnessAuggie,
 		domain.HarnessKiro,
 		domain.HarnessOpenCode,
